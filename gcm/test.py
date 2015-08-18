@@ -94,6 +94,18 @@ class GCMTest(unittest.TestCase):
         self.assertIn('data.param1', result)
         self.assertIn('data.param2', result)
 
+    def test_topic_payload(self):
+        reg_ids = ['12', '145', '56']
+        json_payload = self.gcm.construct_payload(registration_ids=reg_ids,
+                                                  data=self.data,
+                                                  topic='foo')
+        payload = json.loads(json_payload)
+
+        self.assertIn('registration_ids', payload)
+        self.assertEqual(reg_ids, payload['registration_ids'])
+        self.assertIn('to', payload)
+        self.assertEqual('/topics/foo', payload['to'])
+
     def test_limit_reg_ids(self):
         reg_ids = range(1003)
         self.assertTrue(len(reg_ids) > 1000)
