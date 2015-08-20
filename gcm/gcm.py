@@ -36,10 +36,19 @@ class GCMTooManyRegIdsException(GCMException):
 class GCMInvalidTtlException(GCMException):
     pass
 
+
+class GCMTopicMessageException(GCMException):
+    pass
+
+
 # Exceptions from Google responses
 
 
 class GCMMissingRegistrationException(GCMException):
+    pass
+
+
+class GCMInvalidReceiverParameterException(GCMException):
     pass
 
 
@@ -119,9 +128,10 @@ class GCM(object):
             self.proxy = proxy
 
 
-    def construct_payload(self, registration_ids, data=None, collapse_key=None,
+    def construct_payload(self, registration_ids=None, topic=None,
+        data=None, collapse_key=None,
         delay_while_idle=False, time_to_live=None, is_json=True, dry_run=False,
-        restricted_package_name=None, topic=None):
+        restricted_package_name=None):
         """
         Construct the dictionary mapping of parameters.
         Encodes the dictionary into JSON if for json requests.
@@ -136,13 +146,24 @@ class GCM(object):
                 raise GCMInvalidTtlException("Invalid time to live value")
 
         payload = {}
-        if is_json:
-            payload['registration_ids'] = registration_ids
-            if data:
-                payload['data'] = data
+        if all((registration_ids, topic)):
+            raise GCMInvalidReceiverParameterException(
+                "GCM does not support specify both registration_ids and topic")
+        elif registration_ids:
+            registration_key = ('registration_ids'
+                                if type(registration_ids) in (list, tuple)
+                                else 'registration_id')
+            payload[registration_key] = registration_ids
+        elif topic:
+            payload['to'] = '/topics/{}'.format(topic)
         else:
-            payload['registration_id'] = registration_ids
-            if data:
+            raise GCMInvalidReceiverParameterException(
+                "Missing registration_ids or topic")
+
+        if data:
+            if is_json:
+                payload['data'] = data
+            else:
                 for key, value in data.items():
                     payload['data.%s' % key] = value
 
@@ -160,9 +181,6 @@ class GCM(object):
 
         if restricted_package_name:
             payload['restricted_package_name'] = restricted_package_name
-
-        if topic:
-            payload['to'] = '/topics/{}'.format(topic)
 
         if is_json:
             payload = json.dumps(payload)
@@ -258,6 +276,12 @@ class GCM(object):
 
         return info
 
+    def handle_topic_response(self, response):
+        error = response.get('error')
+        if error:
+            raise GCMTopicMessageException(error)
+        return response['message_id']
+
     def extract_unsent_reg_ids(self, info):
         if 'errors' in info and 'Unavailable' in info['errors']:
             return info['errors']['Unavailable']
@@ -265,7 +289,7 @@ class GCM(object):
 
     def plaintext_request(self, registration_id, data=None, collapse_key=None,
                           delay_while_idle=False, time_to_live=None, retries=5,
-                          dry_run=False, restricted_package_name=None, topic=None):
+                          dry_run=False, restricted_package_name=None):
         """
         Makes a plaintext request to GCM servers
 
@@ -279,7 +303,7 @@ class GCM(object):
             raise GCMMissingRegistrationException("Missing registration_id")
 
         payload = self.construct_payload(
-            registration_id,
+            registration_ids=registration_id,
             data=data,
             collapse_key=collapse_key,
             delay_while_idle=delay_while_idle,
@@ -287,7 +311,6 @@ class GCM(object):
             is_json=False,
             dry_run=dry_run,
             restricted_package_name=restricted_package_name,
-            topic=topic,
         )
 
         attempt = 0
@@ -306,7 +329,7 @@ class GCM(object):
 
     def json_request(self, registration_ids, data=None, collapse_key=None,
                      delay_while_idle=False, time_to_live=None, retries=5,
-                     dry_run=False, restricted_package_name=None, topic=None):
+                     dry_run=False, restricted_package_name=None):
         """
         Makes a JSON request to GCM servers
 
@@ -324,7 +347,7 @@ class GCM(object):
                 "Exceded number of registration_ids")
 
         payload = self.construct_payload(
-            registration_ids,
+            registration_ids=registration_ids,
             data=data,
             collapse_key=collapse_key,
             delay_while_idle=delay_while_idle,
@@ -332,7 +355,6 @@ class GCM(object):
             is_json=True,
             dry_run=dry_run,
             restricted_package_name=restricted_package_name,
-            topic=topic,
         )
 
         backoff = self.BACKOFF_INITIAL_DELAY
@@ -351,3 +373,44 @@ class GCM(object):
             else:
                 break
         return info
+
+    def publish_topic_message(self, topic, data=None, collapse_key=None,
+                              delay_while_idle=False, time_to_live=None,
+                              retries=5,
+                              dry_run=False, restricted_package_name=None):
+        """
+        Publish Topic Messaging to GCM servers
+        Ref: https://developers.google.com/cloud-messaging/topic-messaging
+
+        :param topic: topic name for subscribers
+        :param data: dict mapping of key-value pairs of messages
+        :return message_id
+        :raises GCMInvalidReceiverParameterException: if the topic is empty
+        """
+
+        if not topic:
+            raise GCMInvalidReceiverParameterException("topic cannot be empty")
+
+        payload = self.construct_payload(
+            topic=topic,
+            data=data,
+            collapse_key=collapse_key,
+            delay_while_idle=delay_while_idle,
+            time_to_live=time_to_live,
+            is_json=True,
+            dry_run=dry_run,
+            restricted_package_name=restricted_package_name,
+        )
+
+        backoff = self.BACKOFF_INITIAL_DELAY
+        for attempt in range(retries):
+            try:
+                response = self.make_request(payload, is_json=True)
+                return self.handle_topic_response(response)
+            except GCMUnavailableException:
+                sleep_time = backoff / 2 + random.randrange(backoff)
+                time.sleep(float(sleep_time) / 1000)
+                if 2 * backoff < self.MAX_BACKOFF_DELAY:
+                    backoff *= 2
+
+        raise IOError("Could not make request after %d attempts" % attempt)
