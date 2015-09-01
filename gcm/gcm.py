@@ -412,5 +412,5 @@ class GCM(object):
                 time.sleep(float(sleep_time) / 1000)
                 if 2 * backoff < self.MAX_BACKOFF_DELAY:
                     backoff *= 2
-
-        raise IOError("Could not make request after %d attempts" % attempt)
+        else:
+            raise IOError("Could not make request after %d attempts" % retries)
